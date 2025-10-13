@@ -39,8 +39,12 @@ ARGO_PWD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath=
 
 # Exposition automatique d'ArgoCD sur le port 9090
 nohup kubectl port-forward svc/argocd-server -n argocd --address 0.0.0.0 9090:80 > /dev/null 2>&1 &
+kubectl apply -f /vagrant/manifests/app.yaml
+
 
 echo " [SETUP TERMINÉ]"
 echo " ArgoCD accessible à : http://192.168.56.110:9090"
 echo " Identifiant : admin"
 echo " Mot de passe : $ARGO_PWD"
+
+bash /vagrant/script/github_webhook.sh || echo "Impossible de créer le webhook GitHub"

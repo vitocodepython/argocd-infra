@@ -6,7 +6,9 @@ Vagrant.configure("2") do |config|
     cicd.vm.hostname = "cicd"
     cicd.vm.network "private_network", ip: "192.168.56.110"
 
-    # Exécution automatique du script setup.sh à la création
-    cicd.vm.provision "shell", path: "scripts/setup.sh"
+    # Provision automatique
+    cicd.vm.provision "shell",
+      path: "scripts/setup.sh",
+      env: { "GITHUB_TOKEN" => ENV["GITHUB_TOKEN"] }
   end
 end
