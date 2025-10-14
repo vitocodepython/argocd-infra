@@ -1,45 +1,33 @@
-#!/bin/bash
-set -e
-export DEBIAN_FRONTEND=noninteractive
-set -x
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "Préparation du système"
-sudo apt-get update -y
-sudo apt-mark hold grub-efi-amd64 grub-efi-amd64-bin grub2-common linux-image-generic linux-headers-generic linux-firmware openssh-server cloud-init snapd
+OWNER="vitocodepython"
+REPO="app-ci-cd"  
+WEBHOOK_URL="http://192.168.56.110:9090"
+EVENTS='["push"]'
 
-echo "Installation des dépendances"
-sudo apt-get install -yq curl git vim net-tools apt-transport-https ca-certificates gnupg lsb-release jq
+if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+  echo " Aucun GITHUB_TOKEN trouvé."
+  echo "Pour activer la création automatique du webhook GitHub,"
+  echo "exécute : export GITHUB_TOKEN=<votre_token>"
+  echo "puis relance vagrant up"
+  exit 0
+fi
 
-echo "Installation de Docker"
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
-sudo usermod -aG docker vagrant
-sudo systemctl enable docker
-sudo systemctl start docker
+API="https://api.github.com/repos/${OWNER}/${REPO}/hooks"
+AUTH="Authorization: Bearer ${GITHUB_TOKEN}"
 
-echo "Installation de kubectl"
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+payload=$(jq -nc \
+  --arg url "$WEBHOOK_URL" \
+  --argjson events "$EVENTS" \
+  '{name:"web", active:true, events:$events, config:{url:$url, content_type:"json"}}')
 
-echo "Installation de k3d"
-curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-k3d version || echo "Erreur lors de l'installation de k3d"
+existing_id=$(curl -fsSL -H "$AUTH" "$API" | jq -r --arg url "$WEBHOOK_URL" '.[] | select(.config.url==$url) | .id' | head -n1 || true)
 
-echo "Installation et configuration d'ArgoCD"
-k3d cluster create argocd-cluster --api-port 6550 -p "8080:80@loadbalancer" -p "8888:8888@loadbalancer" --agents 1
-kubectl create namespace argocd || true
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-echo "Attente de la disponibilité du serveur ArgoCD"
-kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd
-
-ARGO_PWD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" 2>/dev/null | base64 -d 2>/dev/null || echo "inconnu")
-
-nohup kubectl port-forward svc/argocd-server -n argocd --address 0.0.0.0 9090:80 > /dev/null 2>&1 &
-
-echo "[SETUP TERMINÉ]"
-echo "🌍 ArgoCD accessible à : http://192.168.56.110:9090"
-echo "👤 Identifiant : admin"
-echo "🔑 Mot de passe : $ARGO_PWD"
-
-bash /vagrant/script/github_webhook.sh || echo "⚠️ Impossible de créer le webhook GitHub"
+if [[ -n "${existing_id:-}" ]]; then
+  echo "Webhook existe déjà (#$existing_id)"
+else
+  echo "Création du webhook..."
+  curl -fsSL -X POST -H "$AUTH" -H "Content-Type: application/json" -d "$payload" "$API" >/dev/null
+  echo " Webhook créé avec succès"
+fi

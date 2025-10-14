@@ -8,7 +8,7 @@ Vagrant.configure("2") do |config|
 
     # Provision automatique
     cicd.vm.provision "shell",
-      path: "scripts/setup.sh",
+      path: "script/setup.sh",
       env: { "GITHUB_TOKEN" => ENV["GITHUB_TOKEN"] }
   end
 end
