@@ -5,21 +5,14 @@ metadata:
   namespace: argocd
 spec:
   project: default
-
+  destination:
+    namespace: default
+    server: https://kubernetes.default.svc
   source:
     repoURL: 'https://github.com/vitocodepython/app-ci-cd.git'
     targetRevision: main
-    path: k8s
-    directory:
-      recurse: true
-
-  destination:
-    server: 'https://kubernetes.default.svc'
-    namespace: default
-
+    path: manifests
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
