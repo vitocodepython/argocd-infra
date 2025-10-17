@@ -6,15 +6,18 @@ Vagrant.configure("2") do |config|
     cicd.vm.hostname = "cicd"
     cicd.vm.network "private_network", ip: "192.168.56.110"
 
-    cicd.vm.network "forwarded_port", guest: 9090, host: 9090, auto_correct: true  # ArgoCD
-    cicd.vm.network "forwarded_port", guest: 30088, host: 30088, auto_correct: true # App Nginx
+    # Forwarding ports
+    cicd.vm.network "forwarded_port", guest: 9090, host: 9090, auto_correct: true
+    cicd.vm.network "forwarded_port", guest: 30088, host: 30088, auto_correct: true
+    cicd.vm.network "forwarded_port", guest: 32080, host: 32080, auto_correct: true
+    cicd.vm.network "forwarded_port", guest: 32514, host: 32514, auto_correct: true
 
     cicd.vm.synced_folder ".", "/vagrant"
 
     cicd.vm.provider "virtualbox" do |vb|
       vb.name = "ArgoCD-CICD"
-      vb.memory = 4096
-      vb.cpus = 2
+      vb.memory = 8192
+      vb.cpus = 4
     end
 
     cicd.vm.provision "shell",
@@ -24,4 +27,7 @@ Vagrant.configure("2") do |config|
         "NGROK_AUTHTOKEN" => ENV["NGROK_AUTHTOKEN"]
       }
   end
+
+  # 🕐 Augmente le temps d’attente de démarrage à 10 minutes
+  config.vm.boot_timeout = 600
 end
