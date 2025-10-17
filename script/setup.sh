@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+sleep 30
+echo "🕐 Attente de stabilisation du système avant installation..."
 
-echo " Préparation du système..."
+echo "🧰 Préparation du système..."
 sudo apt-get update -y
 sudo apt-get install -yq curl git vim net-tools apt-transport-https ca-certificates gnupg lsb-release jq dos2unix unzip screen
 
@@ -11,7 +13,7 @@ find /vagrant/script -type f -name "*.sh" -exec dos2unix {} \; || true
 set -x
 
 # --- Docker ---
-echo " Installation de Docker..."
+echo "🐳 Installation de Docker..."
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
 sudo usermod -aG docker vagrant
@@ -19,24 +21,22 @@ sudo systemctl enable docker
 sudo systemctl start docker
 
 # --- kubectl ---
-echo " Installation de kubectl..."
+echo "⚙️ Installation de kubectl..."
 curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
 # --- K3d ---
-echo " Installation de K3d..."
+echo "🚀 Installation de K3d..."
 curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 
-# --- Création du cluster avec mémoire stable ---
-echo " Création du cluster K3d..."
+# --- Création du cluster ---
+echo "🌐 Création du cluster K3d..."
 k3d cluster delete argocd-cluster || true
 k3d cluster create argocd-cluster \
   --api-port 6550 \
   -p "9090:32080@loadbalancer" \
   -p "30088:30088@loadbalancer" \
-  --agents 1 \
-  --k3s-arg "--kubelet-arg=eviction-hard=imagefs.available<1%,memory.available<100Mi,nodefs.available<1%"@agent:0 \
-  --k3s-arg "--kubelet-arg=system-reserved=memory=200Mi"@agent:0
+  --agents 1
 
 # --- kubeconfig ---
 mkdir -p /home/vagrant/.kube
@@ -46,58 +46,100 @@ sudo chown -R vagrant:vagrant /home/vagrant/.kube
 echo 'export KUBECONFIG=/home/vagrant/.kube/config' >> /home/vagrant/.bashrc
 
 # --- ArgoCD ---
-echo " Installation de ArgoCD..."
+echo "🧩 Installation de ArgoCD..."
 kubectl create namespace argocd || true
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-echo " Attente du déploiement d'ArgoCD..."
+echo "⏳ Attente du déploiement d'ArgoCD..."
 kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd || true
 
 # --- Patch du service ---
-echo "  Configuration du service ArgoCD..."
+echo "🛠️ Configuration du service ArgoCD..."
 kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "NodePort","ports":[{"port":80,"nodePort":32080},{"port":443,"nodePort":32514}]}}'
 
 # --- Mot de passe ArgoCD ---
 ARGO_PASS=$(kubectl get secret -n argocd argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 --decode)
-echo " Mot de passe admin ArgoCD: $ARGO_PASS"
+echo "🔑 Mot de passe admin ArgoCD: $ARGO_PASS"
 
-# --- Déploiement automatique de vito-app ---
-echo " Déploiement automatique de vito-app..."
-cat <<EOF | kubectl apply -f -
-apiVersion: argoproj.io/v1alpha1
-kind: Application
+# --- Ajout automatique du repo GitHub ---
+echo "🔗 Ajout du repository GitHub à ArgoCD..."
+kubectl apply -n argocd -f - <<EOF
+apiVersion: v1
+kind: Secret
 metadata:
-  name: vito-app
+  name: vitocodepython-argocd-infra
   namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/vitocodepython/argocd-infra.git
-    targetRevision: HEAD
-    path: manifests
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: default
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  url: https://github.com/vitocodepython/argocd-infra.git
+  type: git
 EOF
 
-echo "⏳ Attente du déploiement de vito-app..."
+# --- Déploiement automatique de vito-app via app.yaml ---
+echo "🚀 Déploiement automatique de vito-app depuis app.yaml..."
+until kubectl get crd applications.argoproj.io &>/dev/null; do
+  echo "⏳ En attente que les CRDs ArgoCD soient prêts..."
+  sleep 5
+done
+kubectl apply -n argocd -f /vagrant/manifests/app.yaml
+
 sleep 30
-kubectl get pods -n default
 
-# --- Vérification finale ---
-ARGO_STATUS=$(kubectl get pods -n argocd | grep argocd-server | awk '{print $3}')
-APP_STATUS=$(kubectl get pods -n default | grep vito-app | awk '{print $3}')
+# ======================
+# 🌍 NGROK SECTION v3.0
+# ======================
+echo "🌍 Installation de Ngrok (v3)..."
+sudo rm -f /usr/local/bin/ngrok
+curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o ngrok.tgz
+tar -xvzf ngrok.tgz
+sudo mv ngrok /usr/local/bin/
+rm ngrok.tgz
 
+# --- Configuration du token ---
+mkdir -p /home/vagrant/.config/ngrok
+if [[ -n "${NGROK_AUTHTOKEN:-}" ]]; then
+  echo "🔐 Ajout du token Ngrok..."
+  echo "authtoken: $NGROK_AUTHTOKEN" > /home/vagrant/.config/ngrok/ngrok.yml
+else
+  echo "⚠️ Aucun NGROK_AUTHTOKEN trouvé, ngrok fonctionnera en mode limité."
+fi
+sudo chown -R vagrant:vagrant /home/vagrant/.config/ngrok
+
+# --- Lancement du tunnel ---
+echo "🚦 Lancement du tunnel Ngrok sur le port 9090..."
+screen -dmS ngrok ngrok http http://0.0.0.0:9090 --log=stdout > /tmp/ngrok.log 2>&1
+sleep 15
+
+NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[]?.public_url' | grep https || true)
+if [[ -z "$NGROK_URL" ]]; then
+  echo "❌ Ngrok ne semble pas démarré (API 4040 inaccessible)."
+  NGROK_URL="non_disponible"
+else
+  echo "🌐 Tunnel Ngrok actif : $NGROK_URL"
+fi
+
+# --- Création / mise à jour du Webhook GitHub ---
+echo "🔗 Configuration du Webhook GitHub..."
+bash /vagrant/script/github_webhook.sh || echo "⚠️ Impossible de créer le webhook GitHub"
+
+# --- Vérification de vito-app ---
+if kubectl get applications.argoproj.io vito-app -n argocd &>/dev/null; then
+  echo "✅ ArgoCD application vito-app est bien créée et synchronisée."
+else
+  echo "❌ vito-app n’a pas pu être détectée dans ArgoCD."
+fi
+
+# --- Récupération de l'URL de vito-app ---
+APP_NODEPORT=$(kubectl get svc vito-app -n default -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "30088")
+APP_URL="http://localhost:${APP_NODEPORT}"
+
+# --- Résumé final ---
 echo "------------------------------------------"
-echo " [INSTALLATION TERMINÉE AVEC SUCCÈS]"
-echo " ArgoCD : http://localhost:9090"
-echo " Identifiant : admin"
-echo " Mot de passe : $ARGO_PASS"
-echo " ArgoCD Status : $ARGO_STATUS"
-echo " Application : http://localhost:30088"
-echo " App Status : $APP_STATUS"
+echo "🎉 [INSTALLATION TERMINÉE AVEC SUCCÈS]"
+echo "🌍 ArgoCD : http://localhost:9090"
+echo "👤 Identifiant : admin"
+echo "🔑 Mot de passe : $ARGO_PASS"
+echo "🌐 Application vito-app : $APP_URL"
+echo "🔗 Tunnel public : $NGROK_URL"
 echo "------------------------------------------"
