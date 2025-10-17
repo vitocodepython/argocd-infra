@@ -1,60 +1,103 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# --- Normalisation des scripts pour éviter les erreurs CRLF ---
+find /vagrant/script -type f -name "*.sh" -exec dos2unix {} \; || true
 set -x
 
-echo "🔧 Préparation du système"
+echo "🧰 Préparation du système..."
 sudo apt-get update -y
-sudo apt-mark hold grub-efi-amd64 grub-efi-amd64-bin grub2-common linux-image-generic linux-headers-generic linux-firmware openssh-server cloud-init snapd
+sudo apt-get install -yq curl git vim net-tools apt-transport-https ca-certificates gnupg lsb-release jq dos2unix unzip
 
-echo "📦 Installation des dépendances"
-sudo apt-get install -yq curl git vim net-tools apt-transport-https ca-certificates gnupg lsb-release dos2unix
-
-echo "🐳 Installation de Docker"
+# --- Installation Docker ---
+echo "🐳 Installation de Docker..."
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
 sudo usermod -aG docker vagrant
 sudo systemctl enable docker
 sudo systemctl start docker
 
-echo "📡 Installation de kubectl"
+# --- Installation kubectl ---
+echo "⚙️ Installation de kubectl..."
 curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-echo "☸️ Installation de k3d"
+# --- Installation K3d ---
+echo "🚀 Installation de K3d..."
 curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-k3d version || echo "⚠️ Erreur lors de l'installation de k3d"
+k3d version
 
-echo "🚀 Création du cluster K3d + exposition des ports"
-k3d cluster create argocd-cluster --api-port 6550 -p "8080:80@loadbalancer" -p "8888:8888@loadbalancer" --agents 1
+# --- Création du cluster ---
+echo "🌐 Création du cluster K3d..."
+k3d cluster create argocd-cluster --api-port 6550 -p "9090:80@loadbalancer" -p "30088:30088@loadbalancer" --agents 1
 
-# Configuration du kubeconfig
-mkdir -p /home/vagrant/.kube
-k3d kubeconfig get argocd-cluster > /home/vagrant/.kube/config
-export KUBECONFIG=/home/vagrant/.kube/config
-echo 'export KUBECONFIG=/home/vagrant/.kube/config' >> /home/vagrant/.bashrc
-
-echo "🧩 Installation d'ArgoCD"
+# --- Installation ArgoCD ---
+echo "🧩 Installation de ArgoCD..."
 kubectl create namespace argocd || true
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --validate=false
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-echo "⏳ Attente de la disponibilité du serveur ArgoCD..."
-kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd
+echo "⏳ Attente du déploiement du serveur ArgoCD..."
+kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd || true
 
-echo "🔑 Récupération du mot de passe admin ArgoCD"
-ARGO_PWD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" 2>/dev/null | base64 -d 2>/dev/null || echo "inconnu")
+ARGO_PWD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d || echo "inconnu")
+echo "🔑 Mot de passe admin ArgoCD: $ARGO_PWD"
 
-echo "🌍 Exposition d'ArgoCD sur le port 9090"
-nohup kubectl port-forward svc/argocd-server -n argocd --address 0.0.0.0 9090:80 > /dev/null 2>&1 &
-
-echo "📁 Déploiement de ton application ArgoCD"
+# --- Déploiement de ton app via ArgoCD ---
+echo "🚀 Déploiement de ton application..."
 dos2unix /vagrant/manifests/app.yaml
 kubectl apply -f /vagrant/manifests/app.yaml
 
-echo "✅ [SETUP TERMINÉ]"
-echo " ArgoCD accessible à : http://localhost:9090"
-echo " Identifiant : admin"
-echo " Mot de passe : $ARGO_PWD"
-echo " Ton app sera accessible via : http://localhost:30088"
+# --- Configuration du kubeconfig propre et persistant ---
+echo "🗂️ Configuration du kubeconfig..."
+sudo mkdir -p /home/vagrant/.kube
+sudo k3d kubeconfig get argocd-cluster > /home/vagrant/.kube/config
+sudo chown -R vagrant:vagrant /home/vagrant/.kube
+echo 'export KUBECONFIG=/home/vagrant/.kube/config' | sudo tee -a /home/vagrant/.bashrc
+export KUBECONFIG=/home/vagrant/.kube/config
+kubectl config use-context k3d-argocd-cluster || true
 
-bash /vagrant/script/github_webhook.sh || echo "⚠️ Impossible de créer le webhook GitHub"
+# --- Installation de ngrok ---
+echo "🌍 Installation de ngrok..."
+curl -s https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -o ngrok.zip
+unzip -o ngrok.zip
+sudo mv ngrok /usr/local/bin/ngrok
+rm ngrok.zip
+
+if [[ -n "${NGROK_AUTHTOKEN:-}" ]]; then
+  echo "🔐 Ajout du token Ngrok..."
+  ngrok authtoken "$NGROK_AUTHTOKEN"
+
+else
+  echo "⚠️ Aucun NGROK_AUTHTOKEN trouvé, ngrok fonctionnera en mode limité."
+fi
+
+# --- Lancement ngrok en arrière-plan ---
+echo "🚦 Lancement de ngrok sur le port 9090..."
+nohup ngrok http 9090 --log=stdout > /tmp/ngrok.log 2>&1 &
+sleep 8
+
+echo "🔎 Vérification du tunnel Ngrok..."
+cat /tmp/ngrok.log | grep -m1 "url=" || echo "⚠️ Aucun tunnel détecté dans les logs."
+NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[]?.public_url' | grep https || true)
+
+if [[ -n "$NGROK_URL" ]]; then
+  echo "🌍 Tunnel ngrok actif : $NGROK_URL"
+else
+  echo "⚠️ Ngrok n'a pas démarré correctement."
+fi
+
+# --- Création du webhook GitHub ---
+echo "🔗 Création du webhook GitHub..."
+export NGROK_URL
+bash /vagrant/script/github_webhook.sh || echo "⚠️ Impossible de créer le webhook"
+
+# --- Vérification finale ---
+echo "⏳ Attente de la synchronisation ArgoCD..."
+sleep 30
+
+echo "✅ [SETUP TERMINÉ]"
+echo "🧠 ArgoCD : http://localhost:9090"
+echo "   ➜ Identifiant : admin"
+echo "   ➜ Mot de passe : $ARGO_PWD"
+echo "🌍 Application : http://localhost:30088"
+echo "🔗 Tunnel public : $NGROK_URL"
