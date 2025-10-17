@@ -1,0 +1,8 @@
+# Ignorer les fichiers Vagrant/VirtualBox
+.vagrant/
+*.vdi
+*.log
+
+# Ignorer les fichiers temporaires
+*.tmp
+*.bak
